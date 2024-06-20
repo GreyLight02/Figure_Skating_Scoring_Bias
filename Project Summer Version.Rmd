@@ -285,14 +285,14 @@ analyze_judge <- function(segment, judge_num){
   home <- segment[,judge_num+9][bool] - segment[,19][bool]
   away <- segment[,judge_num+9][!bool] - segment[,19][!bool]
   
-  return(list(paste0("j_",judge_num), home, away))
+  return(list(paste0("j_",judge_num), segment[,judge_num][1], home, away))
 }
 
 # Run tests on a judge's scores
 test_list <- function(judge_scores){
   
-  home <- judge_scores[[2]]
-  away <- judge_scores[[3]]
+  home <- judge_scores[[3]]
+  away <- judge_scores[[4]]
   
   if (length(home) != 0){
     if (mean(home)-mean(away) > 0){
@@ -308,7 +308,7 @@ test_list <- function(judge_scores){
     perm <- "No home scores to test"
   }
   
-  return(list(judge_scores[[1]], wilcox, perm, c("diff in means", mean(home) -
+  return(list(judge_scores[[1]], judge_scores[[2]], wilcox, perm, c("diff in means", mean(home) -
                                                    mean(away))))
 }
 
