@@ -1,0 +1,465 @@
+---
+title: "STT 461 Project - Judging Bias in Figure Skating"
+author: "Graham Lightle"
+date: "2024-04-17"
+output: pdf_document
+---
+
+
+
+```{r}
+# Load the data set
+skating <- read.csv("D:/MSU/SPRING 24/STT461/SkatingData_19-22_FIXED2.csv")
+```
+
+
+
+```{r}
+# Overview of variables
+str(skating, list.len=ncol(skating))
+```
+
+```{r}
+library("dplyr")
+library("ggplot2")
+
+# Check number of unique competitors per competition
+competitor_count <- skating %>%
+  filter(discipline == "Mens" | discipline == "Womens") %>%
+  group_by(event_year, event_name, discipline) %>%
+  distinct(skater) %>%
+  summarise(n())
+
+competitor_count
+
+# Check number of unique countries per competition
+country_count <- skating %>%
+  filter(discipline == "Mens" | discipline == "Womens") %>%
+  group_by(event_year, event_name, discipline) %>%
+  distinct(nationality) %>%
+  summarise(n())
+
+country_count
+```
+
+How do judges score skaters from their own country compared to the other
+judges on the panel?
+
+```{r}
+# Find entries where a judge shares the same nationality as the skater
+# Filter out pairs and ice dance disciplines
+shared_nat <- skating %>% filter(j1_nat == nationality | j2_nat == nationality
+                                   | j3_nat == nationality |
+                                     j4_nat == nationality |
+                                     j5_nat == nationality |
+                                     j6_nat == nationality |
+                                     j7_nat == nationality |
+                                     j8_nat == nationality |
+                                     j9_nat == nationality ) %>%
+  filter(discipline == "Mens" | discipline == "Womens")
+
+judge_nats <- shared_nat[c("j1_nat", "j2_nat", "j3_nat", "j4_nat", "j5_nat",
+                           "j6_nat", "j7_nat", "j8_nat", "j9_nat","j1_total",
+                           "j2_total", "j3_total", "j4_total", "j5_total",
+                           "j6_total", "j7_total", "j8_total", "j9_total",
+                           "nationality")]
+
+panel_scores <- shared_nat[c("j1_total", "j2_total", "j3_total", "j4_total",
+                             "j5_total", "j6_total", "j7_total", "j8_total",
+                             "j9_total")]
+```
+
+
+```{r}
+# Function to return the score of the 'home judge'
+find_home <- function(row) {
+  for (col in 1:9) {
+    if (is.na(row[col])) {
+      next
+    }
+    else {
+      if (row[col] == row["nationality"]) {
+      return(row[col + 9])
+      }
+    }
+  }
+}
+
+home_judge <- apply(judge_nats, 1, find_home)
+home_judge <- as.numeric(unlist(home_judge))
+
+panel_scores["home"] = home_judge
+
+# Function to calculate the mean of the remaining judges' scores (panel mean)
+find_mean <- function(row) {
+  panel_sum <- sum(row[1:9], na.rm = TRUE)
+  n <- sum(is.na(row[1:9]))
+  mean <- (panel_sum - row["home"])/(8-n)
+}
+
+panel_mean <- apply(panel_scores, 1, find_mean)
+
+```
+
+
+```{r}
+wilcox.test(home_judge, panel_mean, paired = TRUE, alternative = "greater")
+
+# Data frame for the differences between the home judge and mean of the others
+diffs <- data.frame(diff = home_judge - panel_mean)
+# solely for visualization purposes
+diffs$index <- 1:nrow(diffs)
+diffs$sign <- ifelse(diffs$diff > 0, "positive", "negative")
+
+# mean difference for all singles observations
+mean_diffs <- mean(diffs$diff, na.rm = TRUE)
+
+# Overview of the differences for each observation
+ggplot(diffs, aes(x= index, y=diff)) + geom_col(aes(color = sign)) +
+  xlab("Observation") + ylab("Difference") +
+  ggtitle("Home judge score vs. Panel score mean")
+
+temp <- diffs %>% arrange(desc(diff))
+temp$index <- 1:nrow(diffs)
+
+temp %>% arrange(desc(diff)) %>% ggplot(., aes(x= index, y=diff)) +
+  geom_col(aes(color = sign)) + xlab("Observation") + ylab("Difference") +
+  ggtitle("Home judge score vs. Panel score mean (ordered)")
+
+# Distribution of differences
+ggplot(diffs, aes(x= diff)) + geom_histogram(bins = 30) +
+  ggtitle("Distribution of differences from panel mean") +
+  scale_x_continuous(limits = c(-20, 20)) +
+  scale_y_continuous(limits = c(0, 400))
+
+# Checking normality of differences
+ggplot(diffs, aes(sample= diff)) + geom_qq() + geom_qq_line() +
+  labs(title = "QQ Plot Norm (diff from panel mean")
+```
+
+
+```{r}
+# Paired permutation test
+paired_perm <- function(diffs, n, mean, name, year, discipline, segment) {
+  set.seed(1)
+  diff <- replicate(10000, {
+    # sample differences
+    diffs_permuted <- sample(diffs$diff, size=n, replace = FALSE)
+    # assign random positive or negative to each observation
+    diffs_permuted <- sample(c(-1,1), size=n, replace=TRUE) * abs(diffs_permuted)
+    # calculate the mean
+    mean_permuted <- mean(diffs_permuted)
+  })
+  # Histogram of results
+  h1 <- ggplot(data.frame(diff), aes(x = diff)) + geom_histogram(bins = 30)
+  h1 <- h1 + geom_vline(xintercept = mean, col = 'red') +
+    ggtitle(paste0("Permutation test ", discipline, " ", segment, " at ",
+                     year, " ", name))
+
+  # Determine which hypothesis to test
+  if (mean > 0) {
+    hypothesis <- "hA = true mean is greater than 0 (overscoring)"
+    pval <- mean(diff > mean)
+  } else if (mean <= 0) {
+    hypothesis <- "hA = true mean is less than 0 (underscoring)"
+    pval <- mean(diff <= mean)
+  }
+  
+  return(list(h1, pval, hypothesis))
+}
+
+# Bootstrap for confidence intervals
+boot <- function(diffs, n, name, year, discipline, segment) {
+  set.seed(1)
+  diff <- replicate(10000, {
+    # sample differences
+    diffs_permuted <- sample(diffs$diff, size=n, replace = TRUE)
+    # calculate the mean
+    mean_permuted <- mean(diffs_permuted, na.rm = TRUE)
+  })
+  conf_int <- quantile(diff, c(0.025, 0.975), names = FALSE)
+  moe <- conf_int[2]-conf_int[1]
+  # Histogram of results
+  h1 <- ggplot(data.frame(diff), aes(x = diff)) + geom_histogram(bins = 30) +
+    geom_vline(xintercept = conf_int, col = 'red') +
+    ggtitle(paste0("Bootstrap Confidence Interval for ", discipline, " ",
+                     segment, " at ", year, " ", name))
+  
+  return(list(h1, conf_int, moe))
+}
+
+# Apply functions to all singles data
+paired_perm(diffs, 50, mean_diffs, "All competitions", "2019-2022", "diff from panel mean, all", "disciplines")
+
+boot(diffs, 50, "All competitions", "2019-2022", "diff from total, all", "disciplines")
+```
+
+```{r}
+# Testing by country of judge (for all singles data)
+scores <- data.frame(event = shared_nat$event_name, year = shared_nat$event_year,
+                     country = shared_nat$nationality, home = home_judge,
+                     away = panel_mean, hj_diff = home_judge - panel_mean,
+                     discipline = shared_nat$discipline,
+                     segment = shared_nat$segment)
+head(scores)
+
+# Group by country
+by_country <- scores %>% group_by(country) %>%
+  summarize(mean_diff = mean(hj_diff, na.rm = TRUE),
+            st_dev = sd(hj_diff, na.rm = TRUE), n()) %>% arrange(desc(mean_diff))
+by_country
+
+# Plot boxplots
+ggplot(scores, aes(x= country, y= hj_diff)) +
+  geom_hline(yintercept = 0, col = 'black') +
+  geom_boxplot(aes(color = country), show.legend = FALSE) +
+  scale_x_discrete(guide = guide_axis(n.dodge=3))
+
+# Plot distributions for each country
+charts <- scores %>% group_by(country) %>%
+  group_map(.f = ~ ggplot(.x,aes(x= hj_diff)) + geom_histogram(bins = 30) +
+  ggtitle(paste0("Distribution of differences for ", .y$country)) +
+  scale_x_continuous(limits = c(-17, 17)) +
+  scale_y_continuous(limits = c(0, 55)))
+charts
+```
+
+```{r}
+# Exploring outliers for Russia
+russia <- scores %>% filter(country == "RUS")
+russia[russia$hj_diff %in% boxplot.stats(russia$hj_diff)$out,] %>% arrange(desc(hj_diff))
+
+# Exploring outliers for all singles data
+scores[scores$hj_diff %in% boxplot.stats(scores$hj_diff)$out,] %>% arrange(desc(hj_diff))
+```
+
+```{r}
+# Testing by event (for all singles data)
+by_event <- scores %>% group_by(event, year) %>%
+  summarize(mean_diff = mean(hj_diff, na.rm = TRUE),
+            st_dev = sd(hj_diff, na.rm = TRUE), n()) %>% arrange(desc(mean_diff))
+by_event
+
+charts <- scores %>% group_by(event, year) %>% group_map(.f = ~ ggplot(.x,
+      aes(x= country, y= hj_diff)) + geom_hline(yintercept = 0, col = 'black') +
+        geom_point(aes(color = country), size= 5) +
+        ggtitle(paste0("Distribution of differences for the ",
+                       .y$year, " ", .y$event)) + scale_color_hue(c = 50))
+charts
+```
+
+```{r}
+# Functions to get home and away scores for each judge on the panel of an event
+
+# Non-paired permutation test function
+new_perm <- function(home, away) {
+  n <- length(home)
+  all <- c(home, away)
+  mean <- mean(home) - mean(away)
+  diff <- replicate(10000, {
+    
+    # Randomly sample n scores
+    home_perm <- sample(all, size = n, replace = FALSE)
+    # Remaining unsampled go into other list
+    away_perm <- setdiff(all, home_perm)
+    
+    mean_diff <- mean(home_perm) - mean(away_perm)
+})
+  # Determine which hypothesis to test
+    if (mean > 0) {
+    hypothesis <- "hA = true mean is greater than 0 (overscoring)"
+    pval <- mean(diff > mean)
+  } else if (mean <= 0) {
+    hypothesis <- "hA = true mean is less than 0 (underscoring)"
+    pval <- mean(diff <= mean)
+  }
+  
+  return(list("Permutation test", pval))
+}
+
+# Get the home and away scores for a judge
+analyze_judge <- function(segment, judge_num){
+  
+  #Gets the difference from the total score (not panel mean)
+  bool = segment[,judge_num] == segment[,20]
+  home <- segment[,judge_num+9][bool] - segment[,19][bool]
+  away <- segment[,judge_num+9][!bool] - segment[,19][!bool]
+  
+  return(list(paste0("j_",judge_num), home, away))
+}
+
+# Run tests on a judge's scores
+test_list <- function(judge_scores){
+  
+  home <- judge_scores[[2]]
+  away <- judge_scores[[3]]
+  
+  if (length(home) != 0){
+    if (mean(home)-mean(away) > 0){
+    wilcox <- wilcox.test(home, away, alternative = "greater")
+    }
+    else {
+    wilcox <- wilcox.test(home, away, alternative = "less")
+    }
+    perm <- new_perm(home, away)
+  }
+  else {
+    wilcox <- "No home scores to test"
+    perm <- "No home scores to test"
+  }
+  
+  return(list(judge_scores[[1]], wilcox, perm, c("diff in means", mean(home) -
+                                                   mean(away))))
+}
+
+# Run tests for each judge on the panel
+get_results <- function(segment){
+  
+  segment <- segment[c("j1_nat", "j2_nat", "j3_nat", "j4_nat", "j5_nat", "j6_nat",
+             "j7_nat", "j8_nat", "j9_nat","j1_total", "j2_total", "j3_total", "j4_total", "j5_total", "j6_total", "j7_total", "j8_total", "j9_total", "total", "nationality")]
+  
+  results <- list()
+  
+  for (judge in 1:9) {
+    results[[judge]] <- analyze_judge(segment, judge)
+  }
+  
+  return(list("Individual Judge Analysis", lapply(results, test_list)))
+}
+```
+
+
+```{r}
+# Functions to analyze home judge bias by event and segment
+
+run_test <- function(segment) {
+  shared_nat <- segment %>% filter(j1_nat == nationality | j2_nat == nationality
+                                   | j3_nat == nationality |
+                                     j4_nat == nationality |
+                                     j5_nat == nationality |
+                                     j6_nat == nationality |
+                                     j7_nat == nationality |
+                                     j8_nat == nationality |
+                                     j9_nat == nationality )
+  
+  n_obs <- nrow(shared_nat)
+
+  judge_nats <- shared_nat[c("j1_nat", "j2_nat", "j3_nat", "j4_nat", "j5_nat",
+                           "j6_nat", "j7_nat", "j8_nat", "j9_nat","j1_total",
+                           "j2_total", "j3_total", "j4_total", "j5_total",
+                           "j6_total", "j7_total", "j8_total", "j9_total",
+                           "nationality")]
+
+  panel_scores <- shared_nat[c("j1_total", "j2_total", "j3_total", "j4_total",
+                             "j5_total", "j6_total", "j7_total", "j8_total",
+                             "j9_total")]
+
+  home_judge <- apply(judge_nats, 1, find_home)
+  home_judge <- as.numeric(unlist(home_judge))
+
+  panel_scores["home"] = home_judge
+
+  panel_mean <- apply(panel_scores, 1, find_mean)
+  
+  # Data frame for the differences between the home judge and mean of the others
+  diffs <- data.frame(diff = home_judge - panel_mean)
+  # solely for visualization purposes
+  diffs$index <- 1:nrow(diffs)
+  diffs$sign <- ifelse(diffs$diff > 0, "positive", "negative")
+  
+  # mean difference for all singles observations
+  mean_diffs <- mean(diffs$diff, na.rm = TRUE)
+
+  st_dev <- sd(diffs$diff, na.rm = TRUE)
+  
+  # Decide which hypothesis to use for wilcoxon test
+  if (mean_diffs > 0) {
+    w_test <- wilcox.test(home_judge, panel_mean, paired = TRUE, alternative = "greater")
+  } else if (mean_diffs <= 0) {
+    w_test <- wilcox.test(home_judge, panel_mean, paired = TRUE, alternative = "less")
+  }
+  
+  # Paired Permutation test
+  perm_test <- paired_perm(diffs, n_obs, mean_diffs, segment$event_name[1],
+                           segment$event_year[1], paste0("from panel mean, ",
+                          segment$discipline[1]), segment$segment[1])
+
+  # Confidence interval for true mean difference
+  confidence <- boot(diffs, n_obs, segment$event_name[1], segment$event_year[1],
+                     paste0("from total, ", segment$discipline[1]),
+                     segment$segment[1])
+  
+  # Histogram with each observed difference
+  h1 <- ggplot(diffs, aes(x= index, y=diff)) + geom_col(aes(fill = sign)) +
+    xlab("Observation") + ylab("Difference") +
+    ggtitle(paste0("HJ score vs. Panel Mean for ", segment$discipline[1], " ",
+                   segment$segment[1], " at ", segment$event_year[1], " ",
+                   segment$event_name[1])) +
+    scale_x_continuous(breaks = seq(0, max(diffs$index), 1))
+  
+  output <- list(c(segment$discipline[1], segment$segment[1], "# of Obs.",
+                   n_obs, "Standard Deviation of Observations", st_dev), w_test,
+                 c("Permuation Test p-value", perm_test),
+                 c("Bootstrap Confidence Interval",
+                   confidence[c(1,2)], "MOE", as.numeric(confidence[3])/2),
+                 h1, get_results(segment))
+  
+  return(output)
+}
+```
+  
+```{r}
+analyze_event <- function(name, year) {
+  
+  # Filter for specific event only
+  event <- skating %>%
+    filter(event_year == year & event_name == name)
+  
+  # Filter for distinct skater/judge country matches
+  filtered <- event %>% filter(j1_nat == nationality | j2_nat == nationality
+                                   | j3_nat == nationality |
+                                     j4_nat == nationality |
+                                     j5_nat == nationality |
+                                     j6_nat == nationality |
+                                     j7_nat == nationality |
+                                     j8_nat == nationality |
+                                     j9_nat == nationality ) %>%
+  distinct(skater, .keep_all = TRUE)
+  
+  nats <- as.data.frame(table(filtered$nationality)) %>% 
+    rename(Nationality = Var1)
+  
+  # Histogram for frequencies of home judge occurrences on the panel
+  h1 <- ggplot(nats, aes(x = Nationality, y = Freq)) +
+    geom_bar(stat = "identity", aes(fill = Nationality)) +
+    scale_y_continuous(breaks = seq(0, max(nats$Freq), 2)) +
+    scale_fill_hue(c = 50) + theme(legend.position="none") + 
+    ggtitle(paste0("Home Judge Occurrences for ", year, " ", name))
+
+  # Separate into the four segments
+  mens_sp <- event %>%
+    filter(discipline == "Mens", segment == "sp")
+  womens_sp <- event %>%
+    filter(discipline == "Womens", segment == "sp")
+  mens_fp <- event %>%
+    filter(discipline == "Mens", segment == "fp")
+  womens_fp <- event %>%
+    filter(discipline == "Womens", segment == "fp")
+
+  segments <- list(mens_sp,womens_sp,mens_fp,womens_fp)
+  
+  return(list(paste0("Results for ", year, " ", name),
+              lapply(segments, run_test), h1))
+}
+```
+  
+```{r}
+results <- analyze_event("GP NHK Trophy", "2019")
+results
+results <- analyze_event("European Championships", "2020")
+results
+results <- analyze_event("World Championships", "2021")
+results
+results <- analyze_event("Olympic Winter Games", "2022")
+results
+```
